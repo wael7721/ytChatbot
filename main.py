@@ -37,9 +37,5 @@ def transcript(video_id: str):
     else:
         return {"message": "No transcript available for this video."}
 
-@app.get("/")
-def root():
-    return {"message": "ytChatbot API running. Check /health for status."}
-
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
