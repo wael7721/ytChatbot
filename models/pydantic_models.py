@@ -1,7 +1,3 @@
-"""
-Pydantic models for structured video analysis output.
-"""
-
 from pydantic import BaseModel, Field
 from typing import List, Optional
 

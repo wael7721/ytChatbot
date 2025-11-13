@@ -3,7 +3,7 @@ Test script for video segmentation functionality.
 """
 
 from agent import VideoSegmenter
-from getTranscript import getTranscript
+from helpers.getTranscript import getTranscript
 from helpers import extract_video_id, format_duration, format_timestamp
 from dotenv import load_dotenv
 load_dotenv()
