@@ -8,6 +8,7 @@ from models import VideoSegment, VideoSegmentation
 from .video_segmenter import (
     create_segmentation_chain,
     segment_video,
+    segment_long_video,
     format_transcript_snippets,
     format_timestamp,
     create_streaming_segmentation_chain,
@@ -20,6 +21,7 @@ __all__ = [
     "VideoSegmenter",
     "create_segmentation_chain",
     "segment_video",
+    "segment_long_video",
     "format_transcript_snippets",
     "format_timestamp",
     "create_streaming_segmentation_chain",
