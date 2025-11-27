@@ -2,7 +2,7 @@ from fastapi import FastAPI
 import time
 import datetime
 import uvicorn
-from endpoints import transcript_router, segmentation_router
+from endpoints import transcript_router, segmentation_router, chatbot_router
 from dotenv import load_dotenv
 from helpers.db_utils import get_database_stats
 from models import get_db
@@ -22,6 +22,7 @@ def startup_event():
 # Include endpoint routers
 app.include_router(transcript_router)
 app.include_router(segmentation_router)
+app.include_router(chatbot_router)
 
 
 @app.get("/health", tags=["System"])

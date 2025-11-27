@@ -7,8 +7,30 @@ from helpers.getTranscript import getTranscript
 from helpers import extract_video_id
 from agent import segment_video, segment_long_video
 from models import get_db
+import requests
 
 router = APIRouter(prefix="/segment", tags=["Segmentation"])
+
+
+def get_video_title(video_id: str) -> str:
+    """
+    Fetch video title from YouTube using oembed API.
+    
+    Args:
+        video_id: YouTube video ID
+    
+    Returns:
+        Video title or None if unable to fetch
+    """
+    try:
+        url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("title")
+    except Exception as e:
+        print(f"⚠️  Could not fetch title for {video_id}: {e}")
+    return None
 
 
 @router.get("")
@@ -48,16 +70,17 @@ def segment_video_endpoint(video_url: str, force: bool = False):
     if not force:
         cached_segmentation = db.get_segmentation(video_id)
         if cached_segmentation:
-            # Only use cache if segmentation is complete
-            if cached_segmentation["processing_status"] == "complete":
+            # Verify segmentation actually covers the full video
+            is_complete = _verify_segmentation_coverage(cached_segmentation, video_id, db)
+            
+            if is_complete:
                 print(f"✅ Using cached complete segmentation for {video_id}")
                 return cached_segmentation["segmentation"]
             else:
-                # Partial segmentation - warn and reprocess
-                chunks_done = cached_segmentation.get("chunks_processed", 0)
-                total = cached_segmentation.get("total_chunks", 0)
-                print(f"⚠️  Found partial segmentation ({chunks_done}/{total} chunks). Re-processing entire video...")
+                # Incomplete coverage - reprocess
+                print(f"⚠️  Cached segmentation incomplete. Re-processing entire video...")
     else:
+        print(f"🔄 Force reprocessing {video_id}")
         print(f"🔄 Force reprocessing {video_id}")
     
     # Get transcript
@@ -70,8 +93,13 @@ def segment_video_endpoint(video_url: str, force: bool = False):
         # Extract snippets
         snippets = res.snippets if hasattr(res, 'snippets') else res
         
-        # Save video data to database
-        db.save_video(video_id, snippets)
+        # Fetch video title
+        video_title = get_video_title(video_id)
+        if video_title:
+            print(f"📺 Fetched title: {video_title}")
+        
+        # Save video data to database with title
+        db.save_video(video_id, snippets, title=video_title)
         print(f"💾 Saved video transcript for {video_id}")
         
         # Calculate video duration
@@ -120,6 +148,63 @@ def segment_video_endpoint(video_url: str, force: bool = False):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
+
+
+def _verify_segmentation_coverage(cached_segmentation: dict, video_id: str, db) -> bool:
+    """
+    Verify that cached segmentation covers the full video duration.
+    
+    Compares the last segment's end_time with actual video duration.
+    
+    Args:
+        cached_segmentation: Cached segmentation data from database
+        video_id: YouTube video ID
+        db: Database instance
+    
+    Returns:
+        True if segments cover at least 95% of video, False otherwise
+    """
+    # Get video data to determine actual duration
+    video_data = db.get_video(video_id)
+    if not video_data:
+        print(f"  ❌ No video data found in database")
+        return False
+    
+    # Calculate actual video duration from transcript
+    transcript = video_data.get("transcript", [])
+    if not transcript or len(transcript) == 0:
+        print(f"  ❌ No transcript data")
+        return False
+    
+    last_snippet = transcript[-1]
+    if isinstance(last_snippet, dict):
+        actual_duration = last_snippet.get("start", 0) + last_snippet.get("duration", 0)
+    else:
+        actual_duration = last_snippet.start + last_snippet.duration
+    
+    # Get segments from cached segmentation
+    segments = cached_segmentation["segmentation"].get("segments", [])
+    if not segments or len(segments) == 0:
+        print(f"  ❌ No segments found")
+        return False
+    
+    # Find the last segment by end_time
+    last_segment_end = max(seg["end_time"] for seg in segments)
+    
+    # Calculate coverage percentage
+    coverage_percentage = (last_segment_end / actual_duration) * 100 if actual_duration > 0 else 0
+    time_missing = actual_duration - last_segment_end
+    
+    print(f"  📊 Video duration: {actual_duration:.0f}s | Last segment ends: {last_segment_end:.0f}s | Coverage: {coverage_percentage:.1f}%")
+    
+    # Consider complete if segments cover at least 95% of video
+    # (allows for slight variations in processing)
+    is_complete = coverage_percentage >= 95.0
+    
+    if not is_complete:
+        print(f"  ❌ Incomplete: missing last {time_missing:.0f}s ({100-coverage_percentage:.1f}% uncovered)")
+    
+    return is_complete
 
 
 @router.get("/search")
@@ -198,7 +283,7 @@ def get_segmentation_status(video_url: str):
         video_url: YouTube video URL or ID
     
     Returns:
-        Status information including whether segmentation is complete or partial
+        Status information including coverage percentage and completeness
     """
     video_id = extract_video_id(video_url)
     
@@ -211,23 +296,50 @@ def get_segmentation_status(video_url: str):
     if not segmentation:
         raise HTTPException(status_code=404, detail="No segmentation found for this video")
     
+    # Get video data for coverage calculation
+    video_data = db.get_video(video_id)
+    actual_duration = 0
+    last_segment_end = 0
+    coverage_percentage = 0
+    
+    if video_data:
+        transcript = video_data.get("transcript", [])
+        if transcript and len(transcript) > 0:
+            last_snippet = transcript[-1]
+            if isinstance(last_snippet, dict):
+                actual_duration = last_snippet.get("start", 0) + last_snippet.get("duration", 0)
+            else:
+                actual_duration = last_snippet.start + last_snippet.duration
+        
+        # Get last segment end time
+        segments = segmentation["segmentation"].get("segments", [])
+        if segments and len(segments) > 0:
+            last_segment_end = max(seg["end_time"] for seg in segments)
+            coverage_percentage = (last_segment_end / actual_duration) * 100 if actual_duration > 0 else 0
+    
     status_info = {
         "video_id": video_id,
         "status": segmentation["processing_status"],
         "total_segments": segmentation["total_segments"],
-        "created_at": segmentation["created_at"]
+        "created_at": segmentation["created_at"],
+        "video_duration_seconds": round(actual_duration, 1),
+        "last_segment_ends_at": round(last_segment_end, 1),
+        "coverage_percentage": round(coverage_percentage, 1),
+        "is_actually_complete": coverage_percentage >= 95.0
     }
     
     # Add chunk info if partial
     if segmentation["processing_status"] == "partial":
         status_info["chunks_processed"] = segmentation["chunks_processed"]
         status_info["total_chunks"] = segmentation["total_chunks"]
-        status_info["completion_percentage"] = round(
-            (segmentation["chunks_processed"] / segmentation["total_chunks"]) * 100, 1
-        )
-        status_info["message"] = f"Only {segmentation['chunks_processed']}/{segmentation['total_chunks']} chunks processed. Use ?force=true to retry full segmentation."
+        status_info["message"] = f"Partial: {segmentation['chunks_processed']}/{segmentation['total_chunks']} chunks processed. Use ?force=true to retry."
     else:
-        status_info["message"] = "Segmentation complete"
+        # Check if actually complete based on coverage
+        if coverage_percentage >= 95.0:
+            status_info["message"] = f"Complete: {coverage_percentage:.1f}% of video covered"
+        else:
+            time_missing = actual_duration - last_segment_end
+            status_info["message"] = f"Marked complete but missing {time_missing:.0f}s. Use ?force=true to reprocess."
     
     return status_info
 
